@@ -12,16 +12,17 @@ import (
 
 // DirCache caches paths to directory IDs and vice versa
 type DirCache struct {
-	cacheMu      sync.RWMutex
-	cache        map[string]string
-	invCache     map[string]string
-	mu           sync.Mutex
-	fs           DirCacher // Interface to find and make stuff
-	trueRootID   string    // ID of the absolute root
-	root         string    // the path we are working on
-	rootID       string    // ID of the root directory
-	rootParentID string    // ID of the root's parent directory
-	foundRoot    bool      // Whether we have found the root or not
+	cacheMu         sync.RWMutex
+	cache           map[string]string
+	invCache        map[string]string
+	caseInsensitive bool // if true then paths are case insensitive
+	mu              sync.Mutex
+	fs              DirCacher // Interface to find and make stuff
+	trueRootID      string    // ID of the absolute root
+	root            string    // the path we are working on
+	rootID          string    // ID of the root directory
+	rootParentID    string    // ID of the root's parent directory
+	foundRoot       bool      // Whether we have found the root or not
 }
 
 // DirCacher describes an interface for doing the low level directory work
@@ -44,8 +45,20 @@ func New(root string, trueRootID string, fs DirCacher) *DirCache {
 	return d
 }
 
+// SetCaseInsensitive causes the DirCache to treat all paths as case
+// insensitive.
+func (dc *DirCache) SetCaseInsensitive() *DirCache {
+	dc.cacheMu.Lock()
+	dc.caseInsensitive = true
+	dc.cacheMu.Unlock()
+	return dc
+}
+
 // Get an ID given a path
 func (dc *DirCache) Get(path string) (id string, ok bool) {
+	if dc.caseInsensitive {
+		path = strings.ToLower(path)
+	}
 	dc.cacheMu.RLock()
 	id, ok = dc.cache[path]
 	dc.cacheMu.RUnlock()
@@ -62,8 +75,12 @@ func (dc *DirCache) GetInv(id string) (path string, ok bool) {
 
 // Put a path, id into the map
 func (dc *DirCache) Put(path, id string) {
+	pathKey := path
+	if dc.caseInsensitive {
+		pathKey = strings.ToLower(path)
+	}
 	dc.cacheMu.Lock()
-	dc.cache[path] = id
+	dc.cache[pathKey] = id
 	dc.invCache[id] = path
 	dc.cacheMu.Unlock()
 }

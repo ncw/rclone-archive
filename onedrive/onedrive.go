@@ -190,7 +190,7 @@ func NewFs(name, root string) (fs.Fs, error) {
 		return nil, fmt.Errorf("Failed to get root: %v", err)
 	}
 
-	f.dirCache = dircache.New(root, rootInfo.ID, f)
+	f.dirCache = dircache.New(root, rootInfo.ID, f).SetCaseInsensitive()
 
 	// Find the current root
 	err = f.dirCache.FindRoot(false)
