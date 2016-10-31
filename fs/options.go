@@ -129,6 +129,19 @@ func OpenOptionAddHTTPHeaders(headers http.Header, options []OpenOption) {
 	}
 }
 
+// OpenOptionExpectedStatusCode returns the expected HTTP response
+// code for these options
+func OpenOptionExpectedStatusCode(options []OpenOption) (StatusCode int) {
+	StatusCode = http.StatusOK
+	for _, option := range options {
+		switch option.(type) {
+		case *RangeOption, *SeekOption:
+			StatusCode = http.StatusPartialContent
+		}
+	}
+	return StatusCode
+}
+
 // check interface
 var (
 	_ OpenOption = (*RangeOption)(nil)

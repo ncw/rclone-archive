@@ -814,6 +814,14 @@ func (o *Object) Open(options ...fs.OpenOption) (in io.ReadCloser, err error) {
 		} else {
 			in, resp, err = file.OpenTempURLHeaders(rest.ClientWithHeaderReset(o.fs.noAuthClient, headers), headers)
 		}
+		// Work around ACD sometimes returning 200 requests instead of 206
+		expectedStatusCode := fs.OpenOptionExpectedStatusCode(options)
+		if err == nil && resp != nil && in != nil && resp.StatusCode != expectedStatusCode {
+			err = errors.Errorf("expecting HTTP response %d but got %d - retrying", expectedStatusCode, resp.StatusCode)
+			fs.Debug(o, "Error %v", err)
+			_ = in.Close()
+			return true, err
+		}
 		return o.fs.shouldRetry(resp, err)
 	})
 	return in, err
