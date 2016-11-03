@@ -13,6 +13,9 @@ we ignore assets completely!
 */
 
 import (
+	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,6 +45,7 @@ const (
 	fileKind                    = "FILE"
 	assetKind                   = "ASSET"
 	statusAvailable             = "AVAILABLE"
+	statusPending               = "PENDING"
 	timeFormat                  = time.RFC3339 // 2014-03-07T22:31:12.173Z
 	minSleep                    = 20 * time.Millisecond
 	warnFileSize                = 50000 << 20 // Display warning for files larger than this size
@@ -392,8 +396,8 @@ func (f *Fs) listAll(dirID string, title string, directoriesOnly bool, filesOnly
 		}
 		for _, node := range nodes {
 			if node.Name != nil && node.Id != nil && node.Kind != nil && node.Status != nil {
-				// Ignore nodes if not AVAILABLE
-				if *node.Status != statusAvailable {
+				// Ignore nodes if not AVAILABLE or PENDING
+				if *node.Status != statusAvailable && *node.Status != statusAvailable {
 					continue
 				}
 				// Ignore bogus nodes Amazon Drive sometimes reports
@@ -495,7 +499,7 @@ func (f *Fs) List(out fs.ListOpts, dir string) {
 // At the end of large uploads.  The speculation is that the timeout
 // is waiting for the sha1 hashing to complete and the file may well
 // be properly uploaded.
-func (f *Fs) checkUpload(resp *http.Response, in io.Reader, src fs.ObjectInfo, inInfo *acd.File, inErr error, uploadTime time.Duration) (fixedError bool, info *acd.File, err error) {
+func (f *Fs) checkUpload(resp *http.Response, in io.Reader, src fs.ObjectInfo, inInfo *acd.File, inErr error, uploadTime time.Duration, localID string, folder *acd.Folder) (fixedError bool, info *acd.File, err error) {
 	// Return if no error - all is well
 	if inErr == nil {
 		return false, inInfo, inErr
@@ -517,6 +521,39 @@ func (f *Fs) checkUpload(resp *http.Response, in io.Reader, src fs.ObjectInfo, i
 	if !(n == 0 && err == io.EOF) {
 		fs.Debug(src, "Upload error detected but didn't finish upload: %v (%q)", inErr, httpStatus)
 		return false, inInfo, inErr
+	}
+
+	// Are we doing a resume?
+	if localID != "" {
+		//
+		const maxTries = 20
+		for tries := 1; tries < maxTries; tries++ {
+			fs.Debug(src, "Reading resume status try %d/%d", tries, maxTries)
+			resume, err := f.getResumeStatus(src, folder, localID)
+			if err != nil {
+				fs.Debug(src, "Failed to read resume info: %v", err)
+				break
+			} else if resume == nil {
+				fs.Debug(src, "Failed to read resume got nothing")
+			} else {
+				fs.Debug(src, "Resume detected with status %q", resume.UploadState)
+				switch resume.UploadState {
+				case "COMPLETED":
+					return true, inInfo, nil
+				case "FAILED":
+					return false, inInfo, nil
+				case "IN_PROGRESS":
+					// upload not finished!
+					return false, inInfo, nil
+				case "READY_FOR_COMPLETION":
+					// wait
+					time.Sleep(5 * time.Second)
+				default:
+					fs.Debug(src, "Unknown resume state %q", resume.UploadState)
+					return false, inInfo, nil
+				}
+			}
+		}
 	}
 
 	// Don't wait for uploads - assume they will appear later
@@ -556,6 +593,43 @@ func (f *Fs) checkUpload(resp *http.Response, in io.Reader, src fs.ObjectInfo, i
 	return false, inInfo, inErr
 }
 
+// Make a localId from the remote name
+func makeLocalID(remote string) string {
+	sum := md5.Sum([]byte(remote))
+	return hex.EncodeToString(sum[:])
+}
+
+// getResumeStatus
+//
+// If status is 204 then it will try a few times
+func (f *Fs) getResumeStatus(src fs.ObjectInfo, folder *acd.Folder, localID string) (resume *acd.ResumeStatus, err error) {
+	const maxTries = 20
+	const sleepTime = 5 * time.Second
+	var resp *http.Response
+	for tries := 1; tries <= maxTries; tries++ {
+		fs.Debug(src, "Reading ResumeStatus %d/%d", tries, maxTries)
+		err = f.pacer.Call(func() (bool, error) {
+			resume, resp, err = folder.GetResumeStatus(localID)
+			if resp != nil && resp.StatusCode == http.StatusNoContent {
+				return false, nil
+			}
+			return f.shouldRetry(resp, err)
+		})
+		if err != nil {
+			fs.Debug(src, "ResumeStatus read failed: %v", err)
+			return nil, err
+		}
+		if resp != nil && resp.StatusCode == http.StatusNoContent {
+			fs.Debug(src, "ResumeStatus %d - sleep %v and retry", resp.StatusCode, sleepTime)
+			time.Sleep(sleepTime)
+			continue
+		}
+		break
+	}
+	fs.Debug(src, "ResumeStatus %+v", resume)
+	return resume, err
+}
+
 // Put the object into the container
 //
 // Copy the reader in to the new object which is returned
@@ -590,13 +664,65 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo) (fs.Object, error) {
 	folder := acd.FolderFromId(directoryID, o.fs.c.Nodes)
 	var info *acd.File
 	var resp *http.Response
+	localID := makeLocalID(remote)
+	md5sum, err := src.Hash(fs.HashMD5)
+	if err != nil {
+		fs.Debug(src, "Failed to make MD5: %v", md5sum)
+		md5sum = ""
+	}
+	const chunkSize = 6 * 1024 * 1024
 	err = f.pacer.CallNoRetry(func() (bool, error) {
 		start := time.Now()
 		f.startUpload()
-		info, resp, err = folder.Put(in, leaf)
+		if size <= chunkSize {
+			info, resp, err = folder.Put(in, leaf)
+			localID = "" // show we didn't use resume
+		} else {
+			fs.Debug(src, "Put with resume %v %q %q", size, localID, md5sum)
+
+			// Read chunkSize of the stream
+			buf := make([]byte, chunkSize)
+			_, err = io.ReadFull(in, buf)
+			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+				return false, err
+			}
+
+			// Upload that first chunk
+			info, resp, err = folder.PutWithResume(bytes.NewBuffer(buf), leaf, size, localID, md5sum)
+			resume, resumeErr := f.getResumeStatus(src, folder, localID)
+			// FIXME do we want to retry? probably not since getResumeStatus has done low level retries already
+			if resumeErr != nil {
+				return false, resumeErr
+			}
+			// resume might be nil here...
+			// FIXME do something different
+			if resume == nil {
+				return false, errors.New("Can't continue with nil resume")
+			}
+			// Unlikely but we'll check anyway
+			if resume.ReceivedBytes > int64(len(buf)) {
+				return false, errors.New("Not resuming from the start")
+			}
+			// Concatenate remaining bytes in buf with remaining bytes in input stream
+			buf = buf[resume.ReceivedBytes:]
+			in = io.MultiReader(bytes.NewBuffer(buf), in)
+			// Resume the transfer
+			info, resp, err = folder.Resume(resume, in, leaf)
+			// Fill in missing content properties since these aren't returned if the object is in status PENDING
+			if info != nil {
+				if info.ContentProperties.Size == nil {
+					usize := uint64(size)
+					info.ContentProperties.Size = &usize
+				}
+			}
+			file2, _, _ := folder.FileFromID(resume.NodeID)
+			if file2 != nil && file2.Status != nil {
+				fs.Debug(src, "Reread file: status %q", *file2.Status)
+			}
+		}
 		f.stopUpload()
 		var ok bool
-		ok, info, err = f.checkUpload(resp, in, src, info, err, time.Since(start))
+		ok, info, err = f.checkUpload(resp, in, src, info, err, time.Since(start), localID, folder)
 		if ok {
 			return false, nil
 		}
@@ -978,7 +1104,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo) error {
 		info, resp, err = file.Overwrite(in)
 		o.fs.stopUpload()
 		var ok bool
-		ok, info, err = o.fs.checkUpload(resp, in, src, info, err, time.Since(start))
+		ok, info, err = o.fs.checkUpload(resp, in, src, info, err, time.Since(start), "", nil)
 		if ok {
 			return false, nil
 		}
