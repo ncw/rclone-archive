@@ -40,6 +40,7 @@ const (
 	fileKind                    = "FILE"
 	assetKind                   = "ASSET"
 	statusAvailable             = "AVAILABLE"
+	statusPending               = "PENDING"
 	timeFormat                  = time.RFC3339 // 2014-03-07T22:31:12.173Z
 	minSleep                    = 20 * time.Millisecond
 	warnFileSize                = 50000 << 20 // Display warning for files larger than this size
@@ -388,8 +389,8 @@ func (f *Fs) listAll(dirID string, title string, directoriesOnly bool, filesOnly
 		}
 		for _, node := range nodes {
 			if node.Name != nil && node.Id != nil && node.Kind != nil && node.Status != nil {
-				// Ignore nodes if not AVAILABLE
-				if *node.Status != statusAvailable {
+				// Ignore nodes if not AVAILABLE or PENDING
+				if *node.Status != statusAvailable && *node.Status != statusAvailable {
 					continue
 				}
 				// Store the nodes up in case we have to retry the listing
@@ -480,7 +481,7 @@ func (f *Fs) List(out fs.ListOpts, dir string) {
 // At the end of large uploads.  The speculation is that the timeout
 // is waiting for the sha1 hashing to complete and the file may well
 // be properly uploaded.
-func (f *Fs) checkUpload(resp *http.Response, in io.Reader, src fs.ObjectInfo, inInfo *acd.File, inErr error, uploadTime time.Duration) (fixedError bool, info *acd.File, err error) {
+func (f *Fs) checkUpload(resp *http.Response, in io.Reader, src fs.ObjectInfo, inInfo *acd.File, inErr error) (fixedError bool, info *acd.File, err error) {
 	// Return if no error - all is well
 	if inErr == nil {
 		return false, inInfo, inErr
@@ -523,8 +524,12 @@ func (f *Fs) checkUpload(resp *http.Response, in io.Reader, src fs.ObjectInfo, i
 		o, err := f.NewObject(remote)
 		if err == fs.ErrorObjectNotFound {
 			fs.Debug(src, "Object not found - waiting (%d/%d)", i, retries)
+			// FIXME can end if object not found
+			break
 		} else if err != nil {
 			fs.Debug(src, "Object returned error - waiting (%d/%d): %v", i, retries, err)
+			// FIXME can end if error returned? since we have used retries already
+			break
 		} else {
 			if src.Size() == o.Size() {
 				fs.Debug(src, "Object found with correct size %d after waiting (%d/%d) - %v - returning with no error", src.Size(), i, retries, sleepTime*time.Duration(i-1))
@@ -576,7 +581,6 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo) (fs.Object, error) {
 	var info *acd.File
 	var resp *http.Response
 	err = f.pacer.CallNoRetry(func() (bool, error) {
-		start := time.Now()
 		f.startUpload()
 		if src.Size() != 0 {
 			info, resp, err = folder.Put(in, leaf)
@@ -585,7 +589,7 @@ func (f *Fs) Put(in io.Reader, src fs.ObjectInfo) (fs.Object, error) {
 		}
 		f.stopUpload()
 		var ok bool
-		ok, info, err = f.checkUpload(resp, in, src, info, err, time.Since(start))
+		ok, info, err = f.checkUpload(resp, in, src, info, err)
 		if ok {
 			return false, nil
 		}
@@ -731,7 +735,7 @@ func (o *Object) Hash(t fs.HashType) (string, error) {
 	if t != fs.HashMD5 {
 		return "", fs.ErrHashUnsupported
 	}
-	if o.info.ContentProperties.Md5 != nil {
+	if o.info.ContentProperties != nil && o.info.ContentProperties.Md5 != nil {
 		return *o.info.ContentProperties.Md5, nil
 	}
 	return "", nil
@@ -739,6 +743,9 @@ func (o *Object) Hash(t fs.HashType) (string, error) {
 
 // Size returns the size of an object in bytes
 func (o *Object) Size() int64 {
+	if o.info.ContentProperties == nil || o.info.ContentProperties.Size == nil {
+		return 0 // Object is likely PENDING
+	}
 	return int64(*o.info.ContentProperties.Size)
 }
 
@@ -835,7 +842,6 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo) error {
 	var resp *http.Response
 	var err error
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		start := time.Now()
 		o.fs.startUpload()
 		if size != 0 {
 			info, resp, err = file.Overwrite(in)
@@ -844,7 +850,7 @@ func (o *Object) Update(in io.Reader, src fs.ObjectInfo) error {
 		}
 		o.fs.stopUpload()
 		var ok bool
-		ok, info, err = o.fs.checkUpload(resp, in, src, info, err, time.Since(start))
+		ok, info, err = o.fs.checkUpload(resp, in, src, info, err)
 		if ok {
 			return false, nil
 		}
