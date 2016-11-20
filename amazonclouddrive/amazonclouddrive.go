@@ -37,6 +37,7 @@ const (
 	fileKind        = "FILE"
 	assetKind       = "ASSET"
 	statusAvailable = "AVAILABLE"
+	statusPending   = "PENDING"
 	timeFormat      = time.RFC3339 // 2014-03-07T22:31:12.173Z
 	minSleep        = 20 * time.Millisecond
 	warnFileSize    = 50000 << 20 // Display warning for files larger than this size
@@ -372,8 +373,8 @@ func (f *Fs) listAll(dirID string, title string, directoriesOnly bool, filesOnly
 		}
 		for _, node := range nodes {
 			if node.Name != nil && node.Id != nil && node.Kind != nil && node.Status != nil {
-				// Ignore nodes if not AVAILABLE
-				if *node.Status != statusAvailable {
+				// Ignore nodes if not AVAILABLE or PENDING
+				if *node.Status != statusAvailable && *node.Status != statusAvailable {
 					continue
 				}
 				// Ignore bogus nodes Amazon Drive sometimes reports
