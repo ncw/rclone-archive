@@ -462,6 +462,22 @@ func DeleteFile(dst Object) (err error) {
 	return deleteFileWithBackupDir(dst, nil)
 }
 
+// DeleteFileIfExists deletes the object at remote if it exists
+//
+// Does not log, or respect --dry-run
+func DeleteFileIfExists(f Fs, remote string) error {
+	existing, err := f.NewObject(remote)
+	if err == nil {
+		err = existing.Remove()
+		if err != nil {
+			return errors.Wrapf(err, "error when deleting existing object %q", remote)
+		}
+	} else if err != ErrorObjectNotFound {
+		return errors.Wrapf(err, "error when checking if %q exists", remote)
+	}
+	return nil
+}
+
 // deleteFilesWithBackupDir removes all the files passed in the
 // channel
 //

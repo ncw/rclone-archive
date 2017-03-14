@@ -700,6 +700,12 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 		return nil, errors.New("can't copy a Google document")
 	}
 
+	// Delete existing object as Drive duplicates the object if we don't
+	err := fs.DeleteFileIfExists(f, remote)
+	if err != nil {
+		return nil, err
+	}
+
 	o, createInfo, err := f.createFileInfo(remote, srcObj.ModTime(), srcObj.bytes)
 	if err != nil {
 		return nil, err

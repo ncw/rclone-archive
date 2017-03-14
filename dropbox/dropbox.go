@@ -501,6 +501,13 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 		return nil, fs.ErrorCantCopy
 	}
 
+	// Delete existing object as Dropbox doesn't overwrite an
+	// existing object
+	err := fs.DeleteFileIfExists(f, remote)
+	if err != nil {
+		return nil, err
+	}
+
 	// Temporary Object under construction
 	dstObj := &Object{
 		fs:     f,

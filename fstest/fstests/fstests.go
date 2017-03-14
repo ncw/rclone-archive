@@ -439,10 +439,21 @@ func TestFsCopy(t *testing.T) {
 	// Check dst lightly - list above has checked ModTime/Hashes
 	assert.Equal(t, file1Copy.Path, dst.Remote())
 
+	// Check that Copy can overwrite an existing file
+	src = findObject(t, file2.Path)
+	dst, err = doCopy(src, file1Copy.Path)
+	require.NoError(t, err, fmt.Sprintf("Error: %#v", err))
+
+	// check file exists in new listing
+	path := file1Copy.Path
+	file1Copy = file2
+	file1Copy.Path = path
+	file1Copy.WinPath = ""
+	fstest.CheckListing(t, remote, []fstest.Item{file1, file2, file1Copy})
+
 	// Delete copy
 	err = dst.Remove()
 	require.NoError(t, err)
-
 }
 
 // TestFsMove tests Move

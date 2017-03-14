@@ -615,6 +615,13 @@ func (f *Fs) Copy(src fs.Object, remote string) (fs.Object, error) {
 		return nil, errors.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
 	}
 
+	// Delete existing object as OneDrive doesn't overwrite an
+	// existing object
+	err = fs.DeleteFileIfExists(f, remote)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create temporary object
 	dstObj, leaf, directoryID, err := f.createObject(remote, srcObj.modTime, srcObj.size)
 	if err != nil {
