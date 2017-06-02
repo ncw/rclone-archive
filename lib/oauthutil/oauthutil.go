@@ -1,10 +1,12 @@
 package oauthutil
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -119,6 +121,7 @@ type TokenSource struct {
 	config      *oauth2.Config
 	ctx         context.Context
 	expiryTimer *time.Timer // signals whenever the token expires
+	IsFakeACD   bool
 }
 
 // Token returns a token or an error.
@@ -135,7 +138,63 @@ func (ts *TokenSource) Token() (*oauth2.Token, error) {
 		ts.tokenSource = ts.config.TokenSource(ts.ctx, ts.token)
 	}
 
-	token, err := ts.tokenSource.Token()
+	var err error
+	var token *oauth2.Token
+	if ts.IsFakeACD {
+		type ACDResponse struct {
+			AccessToken string `json:"access_token"`
+			TokenType   string `json:"token_type"`
+			ExpiresIn   int    `json:"expires_in"`
+		}
+
+		type ACDRequest struct {
+			SourceToken        string `json:"source_token"`
+			SourceTokenType    string `json:"source_token_type"`
+			RequestedTokenType string `json:"requested_token_type"`
+			AppName            string `json:"app_name"`
+			AppVersion         string `json:"app_version"`
+		}
+
+		url := "https://api.amazon.de/auth/token"
+
+		acdRequest := ACDRequest{SourceToken: ts.token.RefreshToken,
+			SourceTokenType:    "refresh_token",
+			RequestedTokenType: "access_token",
+			AppName:            "Amazon Drive",
+			AppVersion:         "4.0.13.d2a5aec4"}
+		jsonStr, err := json.Marshal(acdRequest)
+		if err != nil {
+			return nil, err
+		}
+
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		tokenData := ACDResponse{}
+		err = json.Unmarshal(body, &tokenData)
+		if err != nil {
+			return nil, err
+		}
+
+		token = &oauth2.Token{RefreshToken: ts.token.RefreshToken, AccessToken: tokenData.AccessToken, TokenType: tokenData.TokenType}
+	} else {
+		token, err = ts.tokenSource.Token()
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -78,6 +78,8 @@ func (t *Token) Type() string {
 // returned by this package.
 func (t *Token) SetAuthHeader(r *http.Request) {
 	r.Header.Set("Authorization", t.Type()+" "+t.AccessToken)
+	r.Header.Set("x-amz-access-token", t.AccessToken)
+	r.Header.Set("x-amz-clouddrive-appid", "YW16bjEuYXBwbGljYXRpb24tb2EyLWNsaWVudC40YTY0NzZkODljYTA0NDQ3OGY3MTI3MDZiN2VjYzYwNA")
 }
 
 // WithExtra returns a new Token that's a clone of t, but using the

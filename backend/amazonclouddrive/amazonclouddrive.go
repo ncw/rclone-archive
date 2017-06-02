@@ -210,6 +210,7 @@ func NewFs(name, root string) (fs.Fs, error) {
 	if err != nil {
 		log.Fatalf("Failed to configure Amazon Drive: %v", err)
 	}
+	ts.IsFakeACD = true
 
 	c := acd.NewClient(oAuthClient)
 	f := &Fs{
