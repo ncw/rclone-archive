@@ -1,9 +1,11 @@
 package mountlib
 
 import (
+	"fmt"
 	"io"
 	"sync"
 
+	"github.com/hashicorp/golang-lru"
 	"github.com/ncw/rclone/fs"
 	"github.com/pkg/errors"
 )
@@ -73,6 +75,10 @@ func (fh *ReadFileHandle) Node() Node {
 	return fh.file
 }
 
+// FIXME global variables
+var lru_cache, _ = lru.New(100)
+var chunksize int64 = 16777216
+
 // seek to a new offset
 //
 // if reopen is true, then we won't attempt to use an io.Seeker interface
@@ -113,6 +119,44 @@ func (fh *ReadFileHandle) seek(offset int64, reopen bool) (err error) {
 	return nil
 }
 
+// getChunk reads a chunk from the file handle into the LRU cache
+func (fh *ReadFileHandle) getChunk(chunk int64, key string) (ret []byte, err error) {
+	var tries = 0
+	var newOffset int64
+	var reopen = false
+	ret = make([]byte, chunksize)
+	for {
+		if fh.offset != (chunk*chunksize) || reopen {
+			err = fh.seek(chunk*chunksize, reopen)
+		}
+
+		if err == nil {
+			var n, err = io.ReadFull(fh.r, ret)
+			newOffset = fh.offset + int64(n)
+			if err != nil && !((err == io.ErrUnexpectedEOF || err == io.EOF) && newOffset == fh.o.Size()) {
+				fs.Errorf(fh.o, "ReadFileHandle.Read error: %v chunk[%d]", err, chunk)
+				reopen = true
+			} else {
+				err = nil
+				fh.offset = newOffset
+				lru_cache.Add(key, ret)
+				fs.Debugf(fh.o, "ReadFileHandle.Read get chunk[%d]", chunk)
+				return ret, err
+			}
+		} else {
+			reopen = true
+		}
+
+		tries++
+
+		if tries > fs.Config.LowLevelRetries {
+			break
+		}
+	}
+	fs.Errorf(fh.o, "ReadFileHandle.Read error: %v", err)
+	return nil, err
+}
+
 // Read from the file handle
 func (fh *ReadFileHandle) Read(reqSize, reqOffset int64) (respData []byte, err error) {
 	fh.mu.Lock()
@@ -126,13 +170,80 @@ func (fh *ReadFileHandle) Read(reqSize, reqOffset int64) (respData []byte, err e
 		fs.Errorf(fh.o, "ReadFileHandle.Read error: %v", EBADF)
 		return nil, EBADF
 	}
-	doSeek := reqOffset != fh.offset
 	var n int
 	var newOffset int64
 	retries := 0
 	buf := make([]byte, reqSize)
 	doReopen := false
 	for {
+		// Does the read span at most 2 chunks?
+		if int64(reqSize) <= chunksize && fh.o.Size() > chunksize {
+			var chunkstart, chunkend int64
+			// Starting chunk for read
+			chunkstart = reqOffset / chunksize
+			// Ending chunk for read
+			chunkend = (reqOffset + int64(reqSize)) / chunksize
+
+			var chunks []byte
+			var chunke []byte
+
+			// Cache key used
+			var key string = fmt.Sprintf("%v-%d", fh.o, chunkstart)
+			var key_next string = fmt.Sprintf("%v-%d", fh.o, chunkstart+1)
+
+			// Look for chunk in LRU Cache
+			var buffer, cached = lru_cache.Get(key)
+			if cached {
+				// Use chunk from cache
+				fs.Debugf(fh.o, "ReadFileHandle.Read cached[%d]", chunkstart)
+				chunks = buffer.([]byte)
+			} else {
+				// Fill cache with chunk
+				chunks, err = fh.getChunk(chunkstart, key)
+				go fh.getChunk(chunkstart+1, key_next)
+			}
+
+			if reqSize > 0 {
+				fh.readCalled = true
+			}
+
+			if err != nil {
+				return nil, err
+			}
+
+			if chunkend != chunkstart {
+				// Start and end chunk differ, read end chunk and join
+
+				key = fmt.Sprintf("%v-%d", fh.o, chunkend)
+
+				var buffer, cached = lru_cache.Get(key)
+				if cached {
+					fs.Debugf(fh.o, "ReadFileHandle.Read cached[%d]", chunkend)
+					chunke = buffer.([]byte)
+				} else {
+					chunke, err = fh.getChunk(chunkend, key)
+				}
+
+				if err == nil {
+					// Offsets into chunks
+					var start = (reqOffset - (chunkstart * chunksize))
+					var end = ((reqOffset + int64(reqSize)) - (chunkend * chunksize))
+
+					respData = append(chunks[start:], chunke[:end]...)
+					fs.Debugf(fh.o, "ReadFileHandle.Read OK[cached]")
+				}
+				return respData, err
+
+			} else {
+				// All data in one chunk, use it
+				respData = chunks[(reqOffset - (chunkstart * chunksize)):((reqOffset + int64(reqSize)) - (chunkstart * chunksize))]
+				fs.Debugf(fh.o, "ReadFileHandle.Read OK[cached]")
+				return respData, err
+			}
+		}
+
+		doSeek := reqOffset != fh.offset
+
 		if doSeek {
 			// Are we attempting to seek beyond the end of the
 			// file - if so just return EOF leaving the underlying
