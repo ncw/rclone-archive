@@ -76,6 +76,33 @@ The time is in RFC3339 format with nanosecond precision.
 
 The whole output can be processed as a JSON blob, or alternatively it
 can be processed line by line as each item is written one to a line.
+
+Here is an example of the output on this directory tree
+
+    /tmp/ls
+    ├── directory
+    │   └── file3.txt
+    ├── file1.txt
+    └── file2.txt
+
+    $ rclone lsjson /tmp/ls
+    [
+    {"Path":"directory","Name":"directory","Size":-1,"ModTime":"2017-07-10T11:04:28.271497613+01:00","IsDir":true},
+    {"Path":"file1.txt","Name":"file1.txt","Size":9,"ModTime":"2017-07-10T11:04:01.43147201+01:00","IsDir":false},
+    {"Path":"file2.txt","Name":"file2.txt","Size":9,"ModTime":"2017-07-10T11:04:03.991474451+01:00","IsDir":false}
+    ]
+
+    $ rclone lsjson -R /tmp/ls
+    [
+    {"Path":"directory","Name":"directory","Size":-1,"ModTime":"2017-07-10T11:04:28.271497613+01:00","IsDir":true},
+    {"Path":"file1.txt","Name":"file1.txt","Size":9,"ModTime":"2017-07-10T11:04:01.43147201+01:00","IsDir":false},
+    {"Path":"file2.txt","Name":"file2.txt","Size":9,"ModTime":"2017-07-10T11:04:03.991474451+01:00","IsDir":false},
+    {"Path":"directory/file3.txt","Name":"file3.txt","Size":9,"ModTime":"2017-07-10T11:04:28.271497613+01:00","IsDir":false}
+    ]
+
+So if you want to parse it line by line, ignore lines with only "[" and
+"]" and strip any trailng commas off lines to get a valid JSON object.
+
 `,
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
