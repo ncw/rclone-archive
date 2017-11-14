@@ -667,6 +667,7 @@ func filterAndSortDir(entries DirEntries, includeAll bool, dir string,
 		}
 		// check remote name belongs in this directry
 		remote := entry.Remote()
+		remote = strings.TrimLeft(remote, "/") // remove leading / - edge case for bucket based remotes
 		switch {
 		case !ok:
 			// ignore
