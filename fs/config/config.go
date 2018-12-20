@@ -578,6 +578,15 @@ func FileGetFresh(section, key string) (value string, err error) {
 	return reloadedConfigFile.GetValue(section, key)
 }
 
+// SetValue sets the key to the value and saves just that
+// value in the runtime config. No changes are writen
+// back to the user's on-disk config file.
+func SetValue(name, key, value string) (err error) {
+	// Set the value in the runtime config only
+	getConfigData().SetValue(name, key, value)
+	return nil
+}
+
 // ShowRemotes shows an overview of the config file
 func ShowRemotes() {
 	remotes := getConfigData().GetSectionList()
