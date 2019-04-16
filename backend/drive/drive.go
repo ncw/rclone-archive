@@ -461,6 +461,11 @@ See: https://github.com/rclone/rclone/issues/3857
 			// Encode invalid UTF-8 bytes as json doesn't handle them properly.
 			// Don't encode / as it's a valid name character in drive.
 			Default: encoder.EncodeInvalidUtf8,
+		}, {
+			Name:     "fast_list_grouping",
+			Default:  50,
+			Help:     "Groups of IDs to request with --fast-list.",
+			Advanced: true,
 		}},
 	})
 
@@ -512,6 +517,7 @@ type Options struct {
 	DisableHTTP2              bool                 `config:"disable_http2"`
 	StopOnUploadLimit         bool                 `config:"stop_on_upload_limit"`
 	Enc                       encoder.MultiEncoder `config:"encoding"`
+	FastListGrouping          int                  `config:"fast_list_grouping"`
 }
 
 // Fs represents a remote drive server
@@ -1646,7 +1652,6 @@ func (f *Fs) listRRunner(ctx context.Context, wg *sync.WaitGroup, in <-chan list
 // of listing recursively that doing a directory traversal.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	const (
-		grouping    = 50
 		inputBuffer = 1000
 	)
 
@@ -1686,7 +1691,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 	in <- listREntry{directoryID, dir}
 
 	for i := 0; i < fs.Config.Checkers; i++ {
-		go f.listRRunner(ctx, &wg, in, out, cb, grouping)
+		go f.listRRunner(ctx, &wg, in, out, cb, f.opt.FastListGrouping)
 	}
 	go func() {
 		// wait until the all directories are processed
