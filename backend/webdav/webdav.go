@@ -27,6 +27,7 @@ import (
 	"github.com/ncw/rclone/fs/fserrors"
 	"github.com/ncw/rclone/fs/fshttp"
 	"github.com/ncw/rclone/fs/hash"
+	"github.com/ncw/rclone/lib/dircache"
 	"github.com/ncw/rclone/lib/pacer"
 	"github.com/ncw/rclone/lib/rest"
 	"github.com/pkg/errors"
@@ -94,19 +95,20 @@ type Options struct {
 
 // Fs represents a remote webdav
 type Fs struct {
-	name               string        // name of this remote
-	root               string        // the path we are working on
-	opt                Options       // parsed options
-	features           *fs.Features  // optional features
-	endpoint           *url.URL      // URL of the host
-	endpointURL        string        // endpoint as a string
-	srv                *rest.Client  // the connection to the one drive server
-	pacer              *fs.Pacer     // pacer for API calls
-	precision          time.Duration // mod time precision
-	canStream          bool          // set if can stream
-	useOCMtime         bool          // set if can use X-OC-Mtime
-	retryWithZeroDepth bool          // some vendors (sharepoint) won't list files when Depth is 1 (our default)
-	hasChecksums       bool          // set if can use owncloud style checksums
+	name               string             // name of this remote
+	root               string             // the path we are working on
+	opt                Options            // parsed options
+	features           *fs.Features       // optional features
+	endpoint           *url.URL           // URL of the host
+	endpointURL        string             // endpoint as a string
+	srv                *rest.Client       // the connection to the one drive server
+	pacer              *fs.Pacer          // pacer for API calls
+	precision          time.Duration      // mod time precision
+	canStream          bool               // set if can stream
+	useOCMtime         bool               // set if can use X-OC-Mtime
+	retryWithZeroDepth bool               // some vendors (sharepoint) won't list files when Depth is 1 (our default)
+	hasChecksums       bool               // set if can use owncloud style checksums
+	dirCache           *dircache.DirCache // Map of directory path to directory id
 }
 
 // Object describes a webdav object
@@ -334,6 +336,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	if err != nil {
 		return nil, err
 	}
+	f.dirCache = dircache.New(root, "", f)
 
 	if root != "" && !rootIsDir {
 		// Check to see if the root actually an existing file
