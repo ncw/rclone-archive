@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ncw/rclone/backend/webdav/api"
@@ -94,19 +95,21 @@ type Options struct {
 
 // Fs represents a remote webdav
 type Fs struct {
-	name               string        // name of this remote
-	root               string        // the path we are working on
-	opt                Options       // parsed options
-	features           *fs.Features  // optional features
-	endpoint           *url.URL      // URL of the host
-	endpointURL        string        // endpoint as a string
-	srv                *rest.Client  // the connection to the one drive server
-	pacer              *fs.Pacer     // pacer for API calls
-	precision          time.Duration // mod time precision
-	canStream          bool          // set if can stream
-	useOCMtime         bool          // set if can use X-OC-Mtime
-	retryWithZeroDepth bool          // some vendors (sharepoint) won't list files when Depth is 1 (our default)
-	hasChecksums       bool          // set if can use owncloud style checksums
+	name               string              // name of this remote
+	root               string              // the path we are working on
+	opt                Options             // parsed options
+	features           *fs.Features        // optional features
+	endpoint           *url.URL            // URL of the host
+	endpointURL        string              // endpoint as a string
+	srv                *rest.Client        // the connection to the one drive server
+	pacer              *fs.Pacer           // pacer for API calls
+	precision          time.Duration       // mod time precision
+	canStream          bool                // set if can stream
+	useOCMtime         bool                // set if can use X-OC-Mtime
+	retryWithZeroDepth bool                // some vendors (sharepoint) won't list files when Depth is 1 (our default)
+	hasChecksums       bool                // set if can use owncloud style checksums
+	dirCacheMu         sync.Mutex          // lock for dirCache
+	dirCache           map[string]struct{} // directories we know exist with absolute paths from root
 }
 
 // Object describes a webdav object
@@ -320,6 +323,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		srv:         rest.NewClient(fshttp.NewClient(fs.Config)).SetRoot(u.String()),
 		pacer:       fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		precision:   fs.ModTimeNotSupported,
+		dirCache:    make(map[string]struct{}, 10),
 	}
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
@@ -491,6 +495,7 @@ func (f *Fs) listAll(dir string, directoriesOnly bool, filesOnly bool, depth str
 		}
 		return found, errors.Wrap(err, "couldn't list files")
 	}
+	f.dirCacheAddDir(opts.Path) // if dir found add it to dirCache
 	//fmt.Printf("result = %#v", &result)
 	baseURL, err := rest.URLJoin(f.endpoint, opts.Path)
 	if err != nil {
@@ -531,6 +536,7 @@ func (f *Fs) listAll(dir string, directoriesOnly bool, filesOnly bool, depth str
 		}
 
 		if isDir {
+			f.dirCacheAddDir(f.dirPath(remote))
 			if filesOnly {
 				continue
 			}
@@ -614,6 +620,43 @@ func (f *Fs) PutStream(in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption
 	return f.Put(in, src, options...)
 }
 
+// Add the native path to the dir cache
+func (f *Fs) dirCacheAddDir(name string) {
+	f.dirCacheMu.Lock()
+	fs.Debugf(f, "Add %q to dirCache", name)
+	f.dirCache[name] = struct{}{}
+	f.dirCacheMu.Unlock()
+}
+
+// Remove the native path from the dir cache
+func (f *Fs) dirCacheRemoveDir(name string) {
+	f.dirCacheMu.Lock()
+	fs.Debugf(f, "Remove %q from dirCache", name)
+	delete(f.dirCache, name)
+	f.dirCacheMu.Unlock()
+}
+
+// Remove the native path and all of its subdirectories
+// Note that native paths always end in `/` for directories
+func (f *Fs) dirCacheRemoveDirAll(name string) {
+	f.dirCacheMu.Lock()
+	for k := range f.dirCache {
+		if strings.HasPrefix(k, name) {
+			fs.Debugf(f, "Remove %q from dirCache", k)
+			delete(f.dirCache, k)
+		}
+	}
+	f.dirCacheMu.Unlock()
+}
+
+// Check to see if the native path exists in the dirCache
+func (f *Fs) dirCacheExists(name string) bool {
+	f.dirCacheMu.Lock()
+	_, found := f.dirCache[name]
+	f.dirCacheMu.Unlock()
+	return found
+}
+
 // mkParentDir makes the parent of the native path dirPath if
 // necessary and any directories above that
 func (f *Fs) mkParentDir(dirPath string) error {
@@ -631,6 +674,10 @@ func (f *Fs) mkParentDir(dirPath string) error {
 
 // low level mkdir, only makes the directory, doesn't attempt to create parents
 func (f *Fs) _mkdir(dirPath string) error {
+	// If directory in dircache is created
+	if f.dirCacheExists(dirPath) {
+		return nil
+	}
 	// We assume the root is already created
 	if dirPath == "" {
 		return nil
@@ -652,8 +699,11 @@ func (f *Fs) _mkdir(dirPath string) error {
 		// already exists
 		// owncloud returns 423/StatusLocked if the create is already in progress
 		if apiErr.StatusCode == http.StatusMethodNotAllowed || apiErr.StatusCode == http.StatusNotAcceptable || apiErr.StatusCode == http.StatusLocked {
-			return nil
+			err = nil
 		}
+	}
+	if err == nil {
+		f.dirCacheAddDir(dirPath)
 	}
 	return err
 }
@@ -715,6 +765,7 @@ func (f *Fs) purgeCheck(dir string, check bool) error {
 	if err != nil {
 		return errors.Wrap(err, "rmdir failed")
 	}
+	f.dirCacheRemoveDirAll(opts.Path)
 	// FIXME parse Multistatus response
 	return nil
 }
