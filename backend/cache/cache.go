@@ -28,6 +28,7 @@ import (
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fspath"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/lib/atexit"
@@ -1441,13 +1442,14 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options [
 		_ = f.cache.ExpireDir(parentCd)
 		f.notifyChangeUpstreamIfNeeded(parentCd.Remote(), fs.EntryDirectory)
 
-		obj, err = f.tempFs.Put(ctx, in, src, options...)
+		cacheRemote := path.Join(f.Root(), src.Remote()) // store file at abs path
+		obj, err = f.tempFs.Put(ctx, in, operations.NewOverrideRemote(src, cacheRemote), options...)
 		if err != nil {
 			fs.Errorf(obj, "put: failed to upload in temp fs: %v", err)
 			return nil, err
 		}
 		fs.Infof(obj, "put: uploaded in temp fs")
-		err = f.cache.addPendingUpload(path.Join(f.Root(), src.Remote()), false)
+		err = f.cache.addPendingUpload(cacheRemote, false)
 		if err != nil {
 			fs.Errorf(obj, "put: failed to queue for upload: %v", err)
 			return nil, err
