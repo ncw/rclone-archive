@@ -46,6 +46,15 @@ func newDir(vfs *VFS, f fs.Fs, parent *Dir, fsDir fs.Directory) *Dir {
 	}
 }
 
+// setEntry updates the directory entry in this node
+func (d *Dir) setEntry(fsDir fs.Directory) {
+	d.mu.Lock()
+	d.entry = fsDir
+	d.path = fsDir.Remote()
+	d.modTime = fsDir.ModTime(context.TODO())
+	d.mu.Unlock()
+}
+
 // String converts it to printablee
 func (d *Dir) String() string {
 	if d == nil {
@@ -292,7 +301,9 @@ func (d *Dir) _readDirFromEntries(entries fs.DirEntries, dirTree dirtree.DirTree
 			}
 		case fs.Directory:
 			// Reuse old dir value if it exists
-			if node == nil || !node.IsDir() {
+			if dir, ok := node.(*Dir); node != nil && ok {
+				dir.setEntry(item)
+			} else {
 				node = newDir(d.vfs, d.f, d, item)
 			}
 			if dirTree != nil {
